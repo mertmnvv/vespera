@@ -1,0 +1,702 @@
+"use client";
+
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { Play, Pause, RotateCcw, SkipForward, Timer, Maximize, Minimize } from "lucide-react";
+import TimerRing from "@/components/TimerRing";
+import StudyPanel from "@/components/StudyPanel";
+import SettingsPanel from "@/components/SettingsPanel";
+import SessionStats from "@/components/SessionStats";
+import DailyLog from "@/components/DailyLog";
+import CalendarView from "@/components/CalendarView";
+import TotalSummary from "@/components/TotalSummary";
+import type { StudyLogs, StudySession } from "@/components/CalendarView";
+
+// ─── Subject list ───────────────────────────────────────────────
+const SUBJECTS = [
+  { id: "tyt-turkce", label: "TYT Türkçe" },
+  { id: "tyt-sosyal", label: "TYT Sosyal" },
+  { id: "tyt-mat", label: "TYT Matematik" },
+  { id: "tyt-fen", label: "TYT Fen" },
+  { id: "ydt-kelime", label: "YDT Kelime Çalışması" },
+  { id: "ydt-grammar", label: "YDT Dilbilgisi (Grammar)" },
+  { id: "ydt-reading", label: "YDT Okuma / Soru Çözümü" },
+  { id: "genel", label: "Genel Çalışma" },
+];
+
+// Build a lookup map: id → label
+const SUBJECT_LABELS: Record<string, string> = {};
+SUBJECTS.forEach((s) => {
+  SUBJECT_LABELS[s.id] = s.label;
+});
+
+// ─── Date helpers ───────────────────────────────────────────────
+function getTodayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// ─── localStorage helpers ───────────────────────────────────────
+function loadFromStorage<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveToStorage(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* quota exceeded — silently ignore */
+  }
+}
+
+// ─── Vespera — Pomodoro Page ────────────────────────────────────
+export default function VesperaPage() {
+  // Settings
+  const [workMinutes, setWorkMinutes] = useState(20);
+  const [breakMinutes, setBreakMinutes] = useState(5);
+
+  // Timer state
+  const [mode, setMode] = useState<"work" | "break">("work");
+  const [secondsLeft, setSecondsLeft] = useState(20 * 60);
+  const [isRunning, setIsRunning] = useState(false);
+  const [hasStartedOnce, setHasStartedOnce] = useState(false);
+
+  // Background accuracy and Wake Lock
+  const wakeLockRef = useRef<any>(null);
+
+  // Subjects
+  const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
+
+  // Stats (simple counters)
+  const [completedSessions, setCompletedSessions] = useState(0);
+  const [totalMinutes, setTotalMinutes] = useState(0);
+
+  // Study logs (date → sessions)
+  const [studyLogs, setStudyLogs] = useState<StudyLogs>({});
+
+  // Modal states
+  const [showCalendar, setShowCalendar] = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
+
+  // Fullscreen state
+  const [isFullScreen, setIsFullScreen] = useState(false);
+
+  // Fullscreen toggle handler
+  const toggleFullScreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((err) => {
+        console.warn(`Error attempting to enable fullscreen: ${err.message}`);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      }
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullScreen(!!document.fullscreenElement);
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  // Alarm audio ref
+  const alarmRef = useRef<HTMLAudioElement | null>(null);
+
+  // Service worker ref
+  const swRef = useRef<ServiceWorkerRegistration | null>(null);
+
+  // Total seconds for current mode
+  const totalSeconds = mode === "work" ? workMinutes * 60 : breakMinutes * 60;
+
+  // ── Register Service Worker & Request Notification Permission ─
+  useEffect(() => {
+    // Register service worker
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker
+        .register("/sw.js")
+        .then((reg) => {
+          swRef.current = reg;
+          console.log("Vespera SW registered");
+        })
+        .catch((err) => {
+          console.warn("SW registration failed:", err);
+        });
+    }
+
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // ── Hydrate from localStorage ─────────────────────────────────
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    const savedWork = loadFromStorage("vespera_work", 20);
+    const savedBreak = loadFromStorage("vespera_break", 5);
+    const savedSessions = loadFromStorage("vespera_sessions", 0);
+    const savedMinutes = loadFromStorage("vespera_minutes", 0);
+    const savedLogs = loadFromStorage<StudyLogs>("vespera_logs", {});
+
+    setWorkMinutes(savedWork);
+    setBreakMinutes(savedBreak);
+    setSecondsLeft(savedWork * 60);
+    setCompletedSessions(savedSessions);
+    setTotalMinutes(savedMinutes);
+    setStudyLogs(savedLogs);
+    setHydrated(true);
+  }, []);
+
+  // ── Persist settings on change ────────────────────────────────
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_work", workMinutes);
+  }, [workMinutes, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_break", breakMinutes);
+  }, [breakMinutes, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_sessions", completedSessions);
+  }, [completedSessions, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_minutes", totalMinutes);
+  }, [totalMinutes, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_logs", studyLogs);
+  }, [studyLogs, hydrated]);
+
+  // ── Record a completed session to study logs ──────────────────
+  const recordSession = useCallback(
+    (subjects: string[], minutes: number) => {
+      const dateKey = getTodayKey();
+      const session: StudySession = {
+        subjects,
+        minutes,
+        completedAt: Date.now(),
+      };
+      setStudyLogs((prev) => ({
+        ...prev,
+        [dateKey]: [...(prev[dateKey] || []), session],
+      }));
+    },
+    []
+  );
+
+  // ── Play alarm sound (custom file from /alarm.mp3) ────────────
+  const playAlarm = useCallback(() => {
+    try {
+      // Stop any previously playing alarm
+      if (alarmRef.current) {
+        alarmRef.current.pause();
+        alarmRef.current.currentTime = 0;
+      }
+
+      const audio = new Audio("/alarm.mp3");
+      audio.volume = 0.7;
+      alarmRef.current = audio;
+      audio.play().catch(() => {
+        /* User hasn't interacted yet — browser may block autoplay */
+        console.warn("Alarm playback blocked by browser");
+      });
+    } catch {
+      console.warn("Alarm audio not available");
+    }
+  }, []);
+
+  // ── Send browser notification via SW ──────────────────────────
+  const sendNotification = useCallback(
+    (isWork: boolean) => {
+      const title = isWork
+        ? "Çalışma süresi bitti!"
+        : "Mola bitti — Haydi tekrar!";
+      const body = isWork
+        ? `${workMinutes} dakikalık oturumu tamamladın. Mola zamanı!`
+        : `${breakMinutes} dakikalık mola bitti. Çalışmaya devam!`;
+
+      // Try via Service Worker first (works in background)
+      if (swRef.current?.active) {
+        swRef.current.active.postMessage({
+          type: "TIMER_DONE",
+          title,
+          body,
+          tag: isWork ? "vespera-work" : "vespera-break",
+        });
+      }
+      // Fallback: direct Notification API
+      else if ("Notification" in window && Notification.permission === "granted") {
+        new Notification(title, {
+          body,
+          icon: "/icon-192.png",
+          tag: isWork ? "vespera-work" : "vespera-break",
+        });
+      }
+    },
+    [workMinutes, breakMinutes]
+  );
+
+  // ── Wake Lock API (Ekranı uyanık tut) ─────────────────────────
+  useEffect(() => {
+    const requestWakeLock = async () => {
+      try {
+        if ("wakeLock" in navigator && isRunning) {
+          wakeLockRef.current = await (navigator as any).wakeLock.request("screen");
+        }
+      } catch (err) {
+        console.warn("Wake lock error:", err);
+      }
+    };
+
+    if (isRunning) {
+      requestWakeLock();
+    } else {
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(console.warn);
+        wakeLockRef.current = null;
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && isRunning) {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(console.warn);
+        wakeLockRef.current = null;
+      }
+    };
+  }, [isRunning]);
+
+  // ── Timer countdown (Timestamp tabanlı) ───────────────────────
+  useEffect(() => {
+    if (!isRunning) return;
+
+    // Çalışmaya başladığı andaki gerçek dünya saatini baz al
+    const targetEndTime = Date.now() + secondsLeft * 1000;
+
+    const interval = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((targetEndTime - Date.now()) / 1000));
+      
+      setSecondsLeft((prev) => {
+        if (prev === remaining) return prev;
+        if (remaining <= 0) {
+          clearInterval(interval);
+          return 0;
+        }
+        return remaining;
+      });
+    }, 500); // Daha pürüzsüz tepki için 500ms
+
+    // Sekme geri geldiğinde anında senkronize et
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        const remaining = Math.max(0, Math.ceil((targetEndTime - Date.now()) / 1000));
+        setSecondsLeft((prev) => {
+          if (prev === remaining) return prev;
+          return remaining <= 0 ? 0 : remaining;
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
+
+  // ── When timer hits zero ──────────────────────────────────────
+  useEffect(() => {
+    if (secondsLeft !== 0 || !hasStartedOnce) return;
+
+    setIsRunning(false);
+
+    // Play alarm and send notification
+    playAlarm();
+    sendNotification(mode === "work");
+
+    if (mode === "work") {
+      // Completed a work session — record it
+      setCompletedSessions((prev) => prev + 1);
+      setTotalMinutes((prev) => prev + workMinutes);
+      recordSession(selectedSubjects, workMinutes);
+
+      // Switch to break
+      setMode("break");
+      setSecondsLeft(breakMinutes * 60);
+    } else {
+      // Break finished, back to work
+      setMode("work");
+      setSecondsLeft(workMinutes * 60);
+      setHasStartedOnce(false);
+    }
+  }, [
+    secondsLeft,
+    hasStartedOnce,
+    mode,
+    workMinutes,
+    breakMinutes,
+    playAlarm,
+    sendNotification,
+    recordSession,
+    selectedSubjects,
+  ]);
+
+  // ── Update document title ─────────────────────────────────────
+  useEffect(() => {
+    const mins = Math.floor(secondsLeft / 60);
+    const secs = secondsLeft % 60;
+    const timeStr = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+
+    if (isRunning || hasStartedOnce) {
+      const modeStr = mode === "work" ? "Çalışma" : "Mola";
+      document.title = `${timeStr} — ${modeStr} | Vespera`;
+    } else {
+      document.title = "Vespera — Pomodoro Zamanlayıcı";
+    }
+
+    return () => {
+      document.title = "Vespera — Pomodoro Zamanlayıcı";
+    };
+  }, [secondsLeft, isRunning, mode, hasStartedOnce]);
+
+  // ── Handlers ──────────────────────────────────────────────────
+  const handleStart = () => {
+    // Stop any playing alarm when starting new session
+    if (alarmRef.current) {
+      alarmRef.current.pause();
+      alarmRef.current.currentTime = 0;
+    }
+    setIsRunning(true);
+    setHasStartedOnce(true);
+  };
+
+  const handlePause = () => {
+    setIsRunning(false);
+  };
+
+  const handleReset = () => {
+    setIsRunning(false);
+    setHasStartedOnce(false);
+    setMode("work");
+    setSecondsLeft(workMinutes * 60);
+    // Stop alarm if playing
+    if (alarmRef.current) {
+      alarmRef.current.pause();
+      alarmRef.current.currentTime = 0;
+    }
+  };
+
+  const handleSkip = () => {
+    setIsRunning(false);
+    if (mode === "work") {
+      setMode("break");
+      setSecondsLeft(breakMinutes * 60);
+    } else {
+      setMode("work");
+      setSecondsLeft(workMinutes * 60);
+    }
+    setHasStartedOnce(false);
+    // Stop alarm if playing
+    if (alarmRef.current) {
+      alarmRef.current.pause();
+      alarmRef.current.currentTime = 0;
+    }
+  };
+
+  const handleWorkChange = (val: number) => {
+    setWorkMinutes(val);
+    if (mode === "work" && !isRunning && !hasStartedOnce) {
+      setSecondsLeft(val * 60);
+    }
+  };
+
+  const handleBreakChange = (val: number) => {
+    setBreakMinutes(val);
+    if (mode === "break" && !isRunning && !hasStartedOnce) {
+      setSecondsLeft(val * 60);
+    }
+  };
+
+  const toggleSubject = (id: string) => {
+    setSelectedSubjects((prev) =>
+      prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
+    );
+  };
+
+  // ── Derived ───────────────────────────────────────────────────
+  const progress = 1 - secondsLeft / totalSeconds;
+  const mins = Math.floor(secondsLeft / 60);
+  const secs = secondsLeft % 60;
+  const timeDisplay = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  const timerLabel = mode === "work" ? "Çalışma" : "Mola";
+  const canStart = selectedSubjects.length > 0 || hasStartedOnce;
+
+  // Today's sessions for DailyLog
+  const todayKey = getTodayKey();
+  const todaySessions = studyLogs[todayKey] || [];
+
+  // Don't render until hydrated (avoids mismatch)
+  if (!hydrated) {
+    return (
+      <main className="min-h-dvh flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+      </main>
+    );
+  }
+
+  return (
+    <>
+      <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 ${isFullScreen ? 'justify-center' : ''}`}>
+        {/* Header */}
+        {!isFullScreen && (
+          <header className="flex flex-col items-center mb-8 sm:mb-12 animate-fade-in-up group cursor-default">
+            <div className="flex items-center gap-3">
+              <div className="relative p-2.5 rounded-xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 shadow-[0_0_20px_rgba(99,102,241,0.05)] transition-all duration-300 group-hover:scale-105 group-hover:border-indigo-500/40">
+                <Timer size={22} className="text-indigo-400 animate-pulse group-hover:rotate-12 transition-transform duration-500" />
+                <div className="absolute inset-0 rounded-xl bg-indigo-500/10 blur-md opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
+              </div>
+              <h1 className="text-3xl font-extrabold tracking-widest bg-gradient-to-r from-zinc-100 via-zinc-300 to-zinc-500 bg-clip-text text-transparent drop-shadow-[0_2px_8px_rgba(255,255,255,0.05)] transition-all duration-300">
+                VESPERA
+              </h1>
+            </div>
+            <p className="mt-3 text-xs font-medium italic tracking-wide text-zinc-400/80 bg-zinc-900/40 border border-zinc-800/30 px-3 py-1 rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)] backdrop-blur-sm group-hover:text-indigo-300 group-hover:border-indigo-500/20 transition-all duration-300">
+              "Aut viam inveniam, aut faciam"
+            </p>
+          </header>
+        )}
+
+        {/* Mode Indicator Pills */}
+        <div className="flex gap-1 p-1 rounded-xl bg-zinc-900/80 border border-zinc-800/50 mb-8 animate-fade-in-up">
+          <button
+            onClick={() => {
+              if (!isRunning) {
+                setMode("work");
+                setSecondsLeft(workMinutes * 60);
+                setHasStartedOnce(false);
+              }
+            }}
+            disabled={isRunning}
+            className={`
+              px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+              transition-all duration-300
+              ${
+                mode === "work"
+                  ? "bg-indigo-500/20 text-indigo-400 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }
+              disabled:cursor-not-allowed
+            `}
+          >
+            Çalışma
+          </button>
+          <button
+            onClick={() => {
+              if (!isRunning) {
+                setMode("break");
+                setSecondsLeft(breakMinutes * 60);
+                setHasStartedOnce(false);
+              }
+            }}
+            disabled={isRunning}
+            className={`
+              px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+              transition-all duration-300
+              ${
+                mode === "break"
+                  ? "bg-emerald-500/20 text-emerald-400 shadow-sm"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }
+              disabled:cursor-not-allowed
+            `}
+          >
+            Mola
+          </button>
+        </div>
+
+        {/* Timer Ring */}
+        <div className="mb-8 animate-fade-in-up" style={{ animationDelay: "0.1s" }}>
+          <TimerRing
+            progress={progress}
+            mode={mode}
+            timeDisplay={timeDisplay}
+            label={timerLabel}
+            isRunning={isRunning}
+          />
+        </div>
+
+        {/* Control Buttons */}
+        <div
+          className="flex items-center gap-3 mb-8 animate-fade-in-up"
+          style={{ animationDelay: "0.2s" }}
+        >
+          {/* Reset */}
+          <button
+            onClick={handleReset}
+            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+            title="Sıfırla"
+          >
+            <RotateCcw size={18} />
+          </button>
+
+          {/* Play / Pause */}
+          {isRunning ? (
+            <button
+              onClick={handlePause}
+              className={`
+                btn-glow p-5 rounded-2xl text-white transition-all duration-300 active:scale-95
+                ${
+                  mode === "work"
+                    ? "bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-500/20"
+                    : "bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-500/20"
+                }
+              `}
+              title="Duraklat"
+            >
+              <Pause size={24} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={handleStart}
+              disabled={!canStart}
+              className={`
+                btn-glow p-5 rounded-2xl text-white transition-all duration-300 active:scale-95
+                ${
+                  mode === "work"
+                    ? "bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-500/20"
+                    : "bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-500/20"
+                }
+                disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
+              `}
+              title="Başlat"
+            >
+              <Play size={24} fill="currentColor" />
+            </button>
+          )}
+
+          {/* Skip */}
+          <button
+            onClick={handleSkip}
+            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+            title="Atla"
+          >
+            <SkipForward size={18} />
+          </button>
+
+          {/* Fullscreen Toggle */}
+          <button
+            onClick={toggleFullScreen}
+            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95 ml-2"
+            title={isFullScreen ? "Tam Ekrandan Çık" : "Tam Ekran (Odak Modu)"}
+          >
+            {isFullScreen ? <Minimize size={18} /> : <Maximize size={18} />}
+          </button>
+        </div>
+
+        {/* Stats */}
+        {!isFullScreen && (
+          <div
+            className="w-full max-w-md mb-6 animate-fade-in-up"
+            style={{ animationDelay: "0.25s" }}
+          >
+            <SessionStats
+              completedSessions={completedSessions}
+              totalMinutes={totalMinutes}
+            />
+          </div>
+        )}
+
+        {/* Daily Log Panel */}
+        {!isFullScreen && (
+          <div
+            className="w-full max-w-md mb-4 animate-fade-in-up"
+            style={{ animationDelay: "0.28s" }}
+          >
+            <DailyLog
+              todaySessions={todaySessions}
+              subjectLabels={SUBJECT_LABELS}
+              onOpenCalendar={() => setShowCalendar(true)}
+              onOpenSummary={() => setShowSummary(true)}
+            />
+          </div>
+        )}
+
+        {/* Bottom panels grid */}
+        {!isFullScreen && (
+          <div
+            className="w-full max-w-md grid grid-cols-1 gap-4 mb-8 animate-fade-in-up"
+            style={{ animationDelay: "0.3s" }}
+          >
+            {/* Study Panel */}
+            <StudyPanel
+              subjects={SUBJECTS}
+              selectedSubjects={selectedSubjects}
+              onToggle={toggleSubject}
+              disabled={isRunning}
+            />
+
+            {/* Settings Panel */}
+            <SettingsPanel
+              workMinutes={workMinutes}
+              breakMinutes={breakMinutes}
+              onWorkChange={handleWorkChange}
+              onBreakChange={handleBreakChange}
+              disabled={isRunning}
+            />
+          </div>
+        )}
+
+        {/* Footer */}
+        {!isFullScreen && (
+          <footer className="mt-auto pt-4 pb-6 text-center">
+            <p className="text-[11px] text-zinc-700 tracking-wider">
+              Odaklan · Çalış · Başar
+            </p>
+          </footer>
+        )}
+      </main>
+
+      {/* Calendar Modal */}
+      {showCalendar && (
+        <CalendarView
+          logs={studyLogs}
+          subjectLabels={SUBJECT_LABELS}
+          onClose={() => setShowCalendar(false)}
+        />
+      )}
+
+      {/* Total Summary Modal */}
+      {showSummary && (
+        <TotalSummary
+          logs={studyLogs}
+          subjectLabels={SUBJECT_LABELS}
+          onClose={() => setShowSummary(false)}
+        />
+      )}
+    </>
+  );
+}
