@@ -39,7 +39,7 @@ export default function DailyLog({
       {/* Header with action buttons */}
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-400 flex items-center gap-2">
-          <span className="w-1 h-4 rounded-full bg-cyan-500 inline-block" />
+          <span className="w-1 h-4 rounded-full bg-zinc-500 inline-block" />
           Bugün
         </h2>
         <div className="flex items-center gap-1.5">
@@ -64,9 +64,9 @@ export default function DailyLog({
 
       {/* Today's total */}
       {totalMinutes > 0 && (
-        <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-cyan-500/5 border border-cyan-500/10">
+        <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-lg bg-zinc-800/15 border border-zinc-700/20">
           <span className="text-xs text-zinc-500">Toplam:</span>
-          <span className="text-sm font-medium text-cyan-400 tabular-nums">
+          <span className="text-sm font-medium text-zinc-300 tabular-nums">
             {Math.floor(totalMinutes / 60) > 0
               ? `${Math.floor(totalMinutes / 60)} saat ${totalMinutes % 60} dk`
               : `${totalMinutes} dk`}
@@ -98,7 +98,7 @@ export default function DailyLog({
                     style={{
                       width: `${pct}%`,
                       background:
-                        "linear-gradient(90deg, rgba(34,211,238,0.4), rgba(129,140,248,0.5))",
+                        "linear-gradient(90deg, rgba(75,75,75,0.4), rgba(191,191,191,0.5))",
                     }}
                   />
                 </div>
@@ -131,7 +131,7 @@ export default function DailyLog({
                     .map((s) => subjectLabels[s] || s)
                     .join(", ")}
                 </span>
-                <span className="ml-auto text-cyan-400/70 shrink-0 tabular-nums">
+                <span className="ml-auto text-zinc-400 shrink-0 tabular-nums">
                   {session.minutes}dk
                 </span>
               </div>

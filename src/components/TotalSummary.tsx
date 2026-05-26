@@ -48,7 +48,7 @@ export default function TotalSummary({
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-400 flex items-center gap-2">
-            <span className="w-1 h-4 rounded-full bg-amber-500 inline-block" />
+            <span className="w-1 h-4 rounded-full bg-zinc-500 inline-block" />
             Toplam Döküm
           </h2>
           <button
@@ -62,7 +62,7 @@ export default function TotalSummary({
         {/* Overview stats */}
         <div className="grid grid-cols-3 gap-3 mb-6">
           <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-zinc-800/30 border border-zinc-800/40">
-            <span className="text-xl font-light text-amber-400 tabular-nums">
+            <span className="text-xl font-light text-zinc-250 tabular-nums">
               {totalDays}
             </span>
             <span className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -70,7 +70,7 @@ export default function TotalSummary({
             </span>
           </div>
           <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-zinc-800/30 border border-zinc-800/40">
-            <span className="text-xl font-light text-violet-400 tabular-nums">
+            <span className="text-xl font-light text-zinc-300 tabular-nums">
               {totalSessions}
             </span>
             <span className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -78,7 +78,7 @@ export default function TotalSummary({
             </span>
           </div>
           <div className="flex flex-col items-center gap-1 p-3 rounded-xl bg-zinc-800/30 border border-zinc-800/40">
-            <span className="text-xl font-light text-indigo-400 tabular-nums">
+            <span className="text-xl font-light text-zinc-200 tabular-nums">
               {totalHours > 0 ? `${totalHours}s ${remainingMins}dk` : `${remainingMins}dk`}
             </span>
             <span className="text-[10px] uppercase tracking-wider text-zinc-500">
@@ -115,7 +115,7 @@ export default function TotalSummary({
                       style={{
                         width: `${pct}%`,
                         background:
-                          "linear-gradient(90deg, rgba(129,140,248,0.5), rgba(139,92,246,0.6))",
+                          "linear-gradient(90deg, rgba(75,75,75,0.4), rgba(191,191,191,0.5))",
                       }}
                     />
                   </div>

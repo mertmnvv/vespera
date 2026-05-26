@@ -20,8 +20,8 @@ export default function SessionStats({
       <div className="flex items-center justify-around gap-4">
         {/* Sessions */}
         <div className="flex flex-col items-center gap-1.5">
-          <div className="flex items-center gap-1.5 text-amber-400">
-            <Flame size={16} />
+          <div className="flex items-center gap-1.5 text-zinc-300">
+            <Flame size={16} className="text-zinc-450" />
             <span className="text-2xl font-light tabular-nums">
               {completedSessions}
             </span>
@@ -32,12 +32,12 @@ export default function SessionStats({
         </div>
 
         {/* Divider */}
-        <div className="w-px h-8 bg-zinc-800" />
+        <div className="w-px h-8 bg-zinc-800/60" />
 
         {/* Total time */}
         <div className="flex flex-col items-center gap-1.5">
-          <div className="flex items-center gap-1.5 text-violet-400">
-            <Trophy size={16} />
+          <div className="flex items-center gap-1.5 text-zinc-300">
+            <Trophy size={16} className="text-zinc-450" />
             <span className="text-2xl font-light tabular-nums">
               {hours > 0 ? `${hours}s ${mins}dk` : `${mins}dk`}
             </span>

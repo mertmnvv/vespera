@@ -1,5 +1,8 @@
 "use client";
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/set-state-in-effect */
+
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Play, Pause, RotateCcw, SkipForward, Timer, Maximize, Minimize } from "lucide-react";
 import TimerRing from "@/components/TimerRing";
@@ -11,8 +14,8 @@ import CalendarView from "@/components/CalendarView";
 import TotalSummary from "@/components/TotalSummary";
 import type { StudyLogs, StudySession } from "@/components/CalendarView";
 
-// ─── Subject list ───────────────────────────────────────────────
-const SUBJECTS = [
+// ─── Subject list (Default values) ──────────────────────────────
+const DEFAULT_SUBJECTS = [
   { id: "tyt-turkce", label: "TYT Türkçe" },
   { id: "tyt-sosyal", label: "TYT Sosyal" },
   { id: "tyt-mat", label: "TYT Matematik" },
@@ -22,12 +25,6 @@ const SUBJECTS = [
   { id: "ydt-reading", label: "YDT Okuma / Soru Çözümü" },
   { id: "genel", label: "Genel Çalışma" },
 ];
-
-// Build a lookup map: id → label
-const SUBJECT_LABELS: Record<string, string> = {};
-SUBJECTS.forEach((s) => {
-  SUBJECT_LABELS[s.id] = s.label;
-});
 
 // ─── Date helpers ───────────────────────────────────────────────
 function getTodayKey() {
@@ -69,8 +66,18 @@ export default function VesperaPage() {
   // Background accuracy and Wake Lock
   const wakeLockRef = useRef<any>(null);
 
-  // Subjects
+  // Subjects (customizable)
+  const [subjects, setSubjects] = useState<{ id: string; label: string }[]>([]);
   const [selectedSubjects, setSelectedSubjects] = useState<string[]>([]);
+
+  // Dynamically compute subjectLabels map
+  const subjectLabels = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    subjects.forEach((s) => {
+      map[s.id] = s.label;
+    });
+    return map;
+  }, [subjects]);
 
   // Stats (simple counters)
   const [completedSessions, setCompletedSessions] = useState(0);
@@ -83,31 +90,52 @@ export default function VesperaPage() {
   const [showCalendar, setShowCalendar] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
 
-  // Fullscreen state
-  const [isFullScreen, setIsFullScreen] = useState(false);
+  // Focus Mode (Visual Fullscreen) state
+  const [isFocusMode, setIsFocusMode] = useState(false);
 
-  // Fullscreen toggle handler
-  const toggleFullScreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch((err) => {
-        console.warn(`Error attempting to enable fullscreen: ${err.message}`);
-      });
+  const toggleFocusMode = () => {
+    const nextFocusMode = !isFocusMode;
+    setIsFocusMode(nextFocusMode);
+
+    // HTML5 Fullscreen enhancement (falls back silently if blocked/unsupported)
+    if (nextFocusMode) {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch((err) => {
+          console.warn(`HTML5 Fullscreen blocked/unsupported: ${err.message}`);
+        });
+      }
     } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
+      if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
       }
     }
   };
 
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullScreen(!!document.fullscreenElement);
+      if (!document.fullscreenElement && isFocusMode) {
+        setIsFocusMode(false);
+      }
     };
     document.addEventListener("fullscreenchange", handleFullscreenChange);
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
     };
-  }, []);
+  }, [isFocusMode]);
+
+  // Subject management actions
+  const handleAddSubject = (label: string) => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    if (subjects.length >= 25) return;
+    const id = `custom-${Date.now()}`;
+    setSubjects((prev) => [...prev, { id, label: trimmed }]);
+  };
+
+  const handleDeleteSubject = (id: string) => {
+    setSubjects((prev) => prev.filter((s) => s.id !== id));
+    setSelectedSubjects((prev) => prev.filter((sId) => sId !== id));
+  };
 
   // Alarm audio ref
   const alarmRef = useRef<HTMLAudioElement | null>(null);
@@ -148,6 +176,7 @@ export default function VesperaPage() {
     const savedSessions = loadFromStorage("vespera_sessions", 0);
     const savedMinutes = loadFromStorage("vespera_minutes", 0);
     const savedLogs = loadFromStorage<StudyLogs>("vespera_logs", {});
+    const savedSubjects = loadFromStorage<{ id: string; label: string }[]>("vespera_subjects", DEFAULT_SUBJECTS);
 
     setWorkMinutes(savedWork);
     setBreakMinutes(savedBreak);
@@ -155,6 +184,7 @@ export default function VesperaPage() {
     setCompletedSessions(savedSessions);
     setTotalMinutes(savedMinutes);
     setStudyLogs(savedLogs);
+    setSubjects(savedSubjects);
     setHydrated(true);
   }, []);
 
@@ -183,6 +213,11 @@ export default function VesperaPage() {
     if (!hydrated) return;
     saveToStorage("vespera_logs", studyLogs);
   }, [studyLogs, hydrated]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_subjects", subjects);
+  }, [subjects, hydrated]);
 
   // ── Record a completed session to study logs ──────────────────
   const recordSession = useCallback(
@@ -464,28 +499,28 @@ export default function VesperaPage() {
   if (!hydrated) {
     return (
       <main className="min-h-dvh flex items-center justify-center">
-        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+        <div className="w-8 h-8 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" />
       </main>
     );
   }
 
   return (
     <>
-      <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 ${isFullScreen ? 'justify-center' : ''}`}>
+      <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 transition-all duration-500 ${isFocusMode ? 'justify-center h-dvh overflow-hidden' : ''}`}>
         {/* Header */}
-        {!isFullScreen && (
+        {!isFocusMode && (
           <header className="flex flex-col items-center mb-8 sm:mb-12 animate-fade-in-up group cursor-default">
             <div className="flex items-center gap-3">
-              <div className="relative p-2.5 rounded-xl bg-gradient-to-br from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 shadow-[0_0_20px_rgba(99,102,241,0.05)] transition-all duration-300 group-hover:scale-105 group-hover:border-indigo-500/40">
-                <Timer size={22} className="text-indigo-400 animate-pulse group-hover:rotate-12 transition-transform duration-500" />
-                <div className="absolute inset-0 rounded-xl bg-indigo-500/10 blur-md opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
+              <div className="relative p-2.5 rounded-xl bg-gradient-to-br from-zinc-500/10 to-zinc-700/10 border border-zinc-700/20 shadow-[0_0_20px_rgba(255,255,255,0.02)] transition-all duration-300 group-hover:scale-105 group-hover:border-zinc-500/40">
+                <Timer size={22} className="text-zinc-400 animate-pulse group-hover:rotate-12 transition-transform duration-500" />
+                <div className="absolute inset-0 rounded-xl bg-zinc-500/5 blur-md opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
               </div>
               <h1 className="text-3xl font-extrabold tracking-widest bg-gradient-to-r from-zinc-100 via-zinc-300 to-zinc-500 bg-clip-text text-transparent drop-shadow-[0_2px_8px_rgba(255,255,255,0.05)] transition-all duration-300">
                 VESPERA
               </h1>
             </div>
-            <p className="mt-3 text-xs font-medium italic tracking-wide text-zinc-400/80 bg-zinc-900/40 border border-zinc-800/30 px-3 py-1 rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)] backdrop-blur-sm group-hover:text-indigo-300 group-hover:border-indigo-500/20 transition-all duration-300">
-              "Aut viam inveniam, aut faciam"
+            <p className="mt-3 text-xs font-medium italic tracking-wide text-zinc-400/80 bg-zinc-900/40 border border-zinc-800/30 px-3 py-1 rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)] backdrop-blur-sm group-hover:text-zinc-200 group-hover:border-zinc-700/20 transition-all duration-300">
+              &quot;Aut viam inveniam, aut faciam&quot;
             </p>
           </header>
         )}
@@ -506,7 +541,7 @@ export default function VesperaPage() {
               transition-all duration-300
               ${
                 mode === "work"
-                  ? "bg-indigo-500/20 text-indigo-400 shadow-sm"
+                  ? "bg-zinc-200 text-zinc-950 shadow-sm font-semibold border border-zinc-300/10"
                   : "text-zinc-500 hover:text-zinc-300"
               }
               disabled:cursor-not-allowed
@@ -528,7 +563,7 @@ export default function VesperaPage() {
               transition-all duration-300
               ${
                 mode === "break"
-                  ? "bg-emerald-500/20 text-emerald-400 shadow-sm"
+                  ? "bg-zinc-800 text-zinc-200 shadow-sm font-semibold border border-zinc-700/30"
                   : "text-zinc-500 hover:text-zinc-300"
               }
               disabled:cursor-not-allowed
@@ -568,11 +603,11 @@ export default function VesperaPage() {
             <button
               onClick={handlePause}
               className={`
-                btn-glow p-5 rounded-2xl text-white transition-all duration-300 active:scale-95
+                btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
                 ${
                   mode === "work"
-                    ? "bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-500/20"
-                    : "bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-500/20"
+                    ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
+                    : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
                 }
               `}
               title="Duraklat"
@@ -584,11 +619,11 @@ export default function VesperaPage() {
               onClick={handleStart}
               disabled={!canStart}
               className={`
-                btn-glow p-5 rounded-2xl text-white transition-all duration-300 active:scale-95
+                btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
                 ${
                   mode === "work"
-                    ? "bg-indigo-600 hover:bg-indigo-500 shadow-lg shadow-indigo-500/20"
-                    : "bg-emerald-600 hover:bg-emerald-500 shadow-lg shadow-emerald-500/20"
+                    ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
+                    : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
                 }
                 disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
               `}
@@ -609,16 +644,16 @@ export default function VesperaPage() {
 
           {/* Fullscreen Toggle */}
           <button
-            onClick={toggleFullScreen}
+            onClick={toggleFocusMode}
             className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95 ml-2"
-            title={isFullScreen ? "Tam Ekrandan Çık" : "Tam Ekran (Odak Modu)"}
+            title={isFocusMode ? "Odak Modundan Çık" : "Odak Modu (Tam Ekran)"}
           >
-            {isFullScreen ? <Minimize size={18} /> : <Maximize size={18} />}
+            {isFocusMode ? <Minimize size={18} /> : <Maximize size={18} />}
           </button>
         </div>
 
         {/* Stats */}
-        {!isFullScreen && (
+        {!isFocusMode && (
           <div
             className="w-full max-w-md mb-6 animate-fade-in-up"
             style={{ animationDelay: "0.25s" }}
@@ -631,14 +666,14 @@ export default function VesperaPage() {
         )}
 
         {/* Daily Log Panel */}
-        {!isFullScreen && (
+        {!isFocusMode && (
           <div
             className="w-full max-w-md mb-4 animate-fade-in-up"
             style={{ animationDelay: "0.28s" }}
           >
             <DailyLog
               todaySessions={todaySessions}
-              subjectLabels={SUBJECT_LABELS}
+              subjectLabels={subjectLabels}
               onOpenCalendar={() => setShowCalendar(true)}
               onOpenSummary={() => setShowSummary(true)}
             />
@@ -646,16 +681,18 @@ export default function VesperaPage() {
         )}
 
         {/* Bottom panels grid */}
-        {!isFullScreen && (
+        {!isFocusMode && (
           <div
             className="w-full max-w-md grid grid-cols-1 gap-4 mb-8 animate-fade-in-up"
             style={{ animationDelay: "0.3s" }}
           >
             {/* Study Panel */}
             <StudyPanel
-              subjects={SUBJECTS}
+              subjects={subjects}
               selectedSubjects={selectedSubjects}
               onToggle={toggleSubject}
+              onAddSubject={handleAddSubject}
+              onDeleteSubject={handleDeleteSubject}
               disabled={isRunning}
             />
 
@@ -671,7 +708,7 @@ export default function VesperaPage() {
         )}
 
         {/* Footer */}
-        {!isFullScreen && (
+        {!isFocusMode && (
           <footer className="mt-auto pt-4 pb-6 text-center">
             <p className="text-[11px] text-zinc-700 tracking-wider">
               Odaklan · Çalış · Başar
@@ -684,7 +721,7 @@ export default function VesperaPage() {
       {showCalendar && (
         <CalendarView
           logs={studyLogs}
-          subjectLabels={SUBJECT_LABELS}
+          subjectLabels={subjectLabels}
           onClose={() => setShowCalendar(false)}
         />
       )}
@@ -693,7 +730,7 @@ export default function VesperaPage() {
       {showSummary && (
         <TotalSummary
           logs={studyLogs}
-          subjectLabels={SUBJECT_LABELS}
+          subjectLabels={subjectLabels}
           onClose={() => setShowSummary(false)}
         />
       )}

@@ -22,49 +22,46 @@ export default function TimerRing({
   label,
   isRunning,
 }: TimerRingProps) {
-  const size = 280;
-  const strokeWidth = 6;
-  const radius = (size - strokeWidth) / 2;
+  const baseSize = 400;
+  const strokeWidth = 8;
+  const radius = (baseSize - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - progress);
 
-  const accentColor = mode === "work" ? "#818cf8" : "#34d399";
+  const accentColor = mode === "work" ? "#bfbfbf" : "#7d7d7d";
   const glowColor =
-    mode === "work" ? "rgba(129, 140, 248, 0.4)" : "rgba(52, 211, 153, 0.4)";
+    mode === "work" ? "rgba(191, 191, 191, 0.25)" : "rgba(125, 125, 125, 0.25)";
 
   return (
     <div className="relative flex items-center justify-center">
       {/* Glow backdrop */}
       <div
-        className="absolute rounded-full transition-all duration-1000"
+        className="absolute rounded-full transition-all duration-1000 w-[330px] h-[330px] xs:w-[360px] xs:h-[360px] sm:w-[430px] sm:h-[430px] md:w-[470px] md:h-[470px]"
         style={{
-          width: size + 40,
-          height: size + 40,
           background: `radial-gradient(circle, ${glowColor} 0%, transparent 70%)`,
-          opacity: isRunning ? 0.6 : 0.2,
+          opacity: isRunning ? 0.7 : 0.2,
         }}
       />
 
       <svg
-        width={size}
-        height={size}
-        className={`-rotate-90 ${isRunning ? "timer-ring-pulse" : ""}`}
+        viewBox={`0 0 ${baseSize} ${baseSize}`}
+        className={`w-72 h-72 xs:w-80 xs:h-80 sm:w-96 sm:h-96 md:w-[400px] md:h-[400px] -rotate-90 transition-all duration-300 ${isRunning ? "timer-ring-pulse" : ""}`}
         style={{ color: accentColor }}
       >
         {/* Background track */}
         <circle
-          cx={size / 2}
-          cy={size / 2}
+          cx={baseSize / 2}
+          cy={baseSize / 2}
           r={radius}
           fill="none"
-          stroke="rgba(63, 63, 70, 0.3)"
+          stroke="rgba(125, 125, 125, 0.15)"
           strokeWidth={strokeWidth}
         />
 
         {/* Progress ring */}
         <circle
-          cx={size / 2}
-          cy={size / 2}
+          cx={baseSize / 2}
+          cy={baseSize / 2}
           r={radius}
           fill="none"
           stroke={accentColor}
@@ -74,22 +71,22 @@ export default function TimerRing({
           strokeDashoffset={offset}
           className="transition-all duration-500 ease-linear"
           style={{
-            filter: `drop-shadow(0 0 8px ${glowColor})`,
+            filter: `drop-shadow(0 0 10px ${glowColor})`,
           }}
         />
 
         {/* Decorative dots on track */}
         {[0, 90, 180, 270].map((angle) => {
           const rad = (angle * Math.PI) / 180;
-          const cx = size / 2 + radius * Math.cos(rad);
-          const cy = size / 2 + radius * Math.sin(rad);
+          const cx = baseSize / 2 + radius * Math.cos(rad);
+          const cy = baseSize / 2 + radius * Math.sin(rad);
           return (
             <circle
               key={angle}
               cx={cx}
               cy={cy}
-              r={2}
-              fill="rgba(161, 161, 170, 0.3)"
+              r={3}
+              fill="rgba(125, 125, 125, 0.25)"
             />
           );
         })}
@@ -98,7 +95,7 @@ export default function TimerRing({
       {/* Center content */}
       <div className="absolute flex flex-col items-center gap-1">
         <span
-          className="text-6xl font-light tracking-wider tabular-nums transition-colors duration-500"
+          className="text-6xl sm:text-7xl font-light tracking-wider tabular-nums transition-colors duration-500"
           style={{ color: accentColor }}
         >
           {timeDisplay}
@@ -114,7 +111,7 @@ export default function TimerRing({
               className="w-1.5 h-1.5 rounded-full animate-pulse"
               style={{ backgroundColor: accentColor }}
             />
-            <span className="text-[10px] text-zinc-600 uppercase tracking-widest">
+            <span className="text-[10px] text-zinc-500 uppercase tracking-widest">
               Aktif
             </span>
           </div>

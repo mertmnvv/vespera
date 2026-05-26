@@ -106,7 +106,7 @@ export default function CalendarView({
         {/* Header */}
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-zinc-400 flex items-center gap-2">
-            <span className="w-1 h-4 rounded-full bg-violet-500 inline-block" />
+            <span className="w-1 h-4 rounded-full bg-zinc-500 inline-block" />
             Takvim
           </h2>
           <button
@@ -166,10 +166,10 @@ export default function CalendarView({
 
             // Intensity level for the heat indicator
             let intensityClass = "";
-            if (minutesStudied >= 120) intensityClass = "bg-indigo-500/50";
-            else if (minutesStudied >= 60) intensityClass = "bg-indigo-500/35";
-            else if (minutesStudied >= 20) intensityClass = "bg-indigo-500/20";
-            else if (minutesStudied > 0) intensityClass = "bg-indigo-500/10";
+            if (minutesStudied >= 120) intensityClass = "bg-zinc-200 text-zinc-950";
+            else if (minutesStudied >= 60) intensityClass = "bg-zinc-500/60 text-zinc-100";
+            else if (minutesStudied >= 20) intensityClass = "bg-zinc-700/40 text-zinc-300";
+            else if (minutesStudied > 0) intensityClass = "bg-zinc-850/30 text-zinc-450";
 
             return (
               <button
@@ -178,8 +178,8 @@ export default function CalendarView({
                 className={`
                   aspect-square flex flex-col items-center justify-center rounded-lg
                   text-xs transition-all duration-200 relative
-                  ${isSelected ? "ring-1 ring-indigo-500/60 bg-indigo-500/15" : ""}
-                  ${isToday && !isSelected ? "ring-1 ring-zinc-600" : ""}
+                  ${isSelected ? "ring-1 ring-zinc-400 bg-zinc-800" : ""}
+                  ${isToday && !isSelected ? "ring-1 ring-zinc-650" : ""}
                   ${!isSelected && hasData ? intensityClass : ""}
                   ${!isSelected && !hasData ? "hover:bg-zinc-800/40" : ""}
                   ${hasData ? "text-zinc-200" : "text-zinc-500"}
@@ -187,7 +187,7 @@ export default function CalendarView({
               >
                 <span className={isToday ? "font-semibold" : ""}>{day}</span>
                 {hasData && (
-                  <span className="text-[8px] text-indigo-400 mt-0.5 leading-none">
+                  <span className={`text-[8px] mt-0.5 leading-none ${minutesStudied >= 120 ? 'text-zinc-800 font-medium' : 'text-zinc-400'}`}>
                     {minutesStudied}dk
                   </span>
                 )}
@@ -202,7 +202,7 @@ export default function CalendarView({
             <h3 className="text-xs font-medium text-zinc-400 mb-3">
               {selectedDate === todayKey ? "Bugün" : selectedDate}
               {selectedTotalMinutes > 0 && (
-                <span className="ml-2 text-indigo-400">
+                <span className="ml-2 text-zinc-405">
                   — {selectedTotalMinutes} dakika
                 </span>
               )}
@@ -226,7 +226,7 @@ export default function CalendarView({
                         </div>
                         <div className="h-1.5 bg-zinc-800/60 rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-indigo-500/60 rounded-full transition-all duration-500"
+                            className="h-full bg-zinc-400 rounded-full transition-all duration-500"
                             style={{
                               width: `${Math.min(100, (mins / Math.max(selectedTotalMinutes, 1)) * 100)}%`,
                             }}
@@ -262,7 +262,7 @@ export default function CalendarView({
                           .map((s) => subjectLabels[s] || s)
                           .join(", ")}
                       </span>
-                      <span className="ml-auto text-indigo-400 shrink-0">
+                      <span className="ml-auto text-zinc-400 shrink-0">
                         {session.minutes}dk
                       </span>
                     </div>
