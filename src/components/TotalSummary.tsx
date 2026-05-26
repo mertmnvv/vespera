@@ -2,6 +2,7 @@
 
 import React from "react";
 import type { StudyLogs } from "./CalendarView";
+import StudyDonutChart from "./StudyDonutChart";
 
 interface TotalSummaryProps {
   logs: StudyLogs;
@@ -85,6 +86,11 @@ export default function TotalSummary({
               Toplam
             </span>
           </div>
+        </div>
+
+        {/* Interactive Donut Chart */}
+        <div className="mb-6 animate-fade-in-up">
+          <StudyDonutChart logs={logs} subjectLabels={subjectLabels} />
         </div>
 
         {/* Per-subject breakdown */}

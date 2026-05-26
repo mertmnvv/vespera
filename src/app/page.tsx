@@ -4,7 +4,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, RotateCcw, SkipForward, Timer, Maximize, Minimize } from "lucide-react";
+import { Play, Pause, RotateCcw, SkipForward, Timer, Maximize, Minimize, Loader2 } from "lucide-react";
 import TimerRing from "@/components/TimerRing";
 import StudyPanel from "@/components/StudyPanel";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -13,6 +13,11 @@ import DailyLog from "@/components/DailyLog";
 import CalendarView from "@/components/CalendarView";
 import TotalSummary from "@/components/TotalSummary";
 import type { StudyLogs, StudySession } from "@/components/CalendarView";
+import AuthModal from "@/components/AuthModal";
+import WeeklyTodoList, { TodoTask } from "@/components/WeeklyTodoList";
+import { auth, db } from "@/lib/firebase";
+import { onAuthStateChanged, signOut, User } from "firebase/auth";
+import { doc, getDoc, setDoc } from "firebase/firestore";
 
 // ─── Subject list (Default values) ──────────────────────────────
 const DEFAULT_SUBJECTS = [
@@ -86,12 +91,157 @@ export default function VesperaPage() {
   // Study logs (date → sessions)
   const [studyLogs, setStudyLogs] = useState<StudyLogs>({});
 
+  // Weekly Todos state
+  const [weeklyTodos, setWeeklyTodos] = useState<TodoTask[]>([]);
+
   // Modal states
   const [showCalendar, setShowCalendar] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
 
   // Focus Mode (Visual Fullscreen) state
   const [isFocusMode, setIsFocusMode] = useState(false);
+
+  // Firebase Auth states
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  // Cloud save helper
+  const saveToCloud = useCallback(async (key: string, value: any) => {
+    if (!auth.currentUser) return;
+    try {
+      const userDocRef = doc(db, "users", auth.currentUser.uid);
+      await setDoc(
+        userDocRef,
+        { [key]: value, updatedAt: Date.now() },
+        { merge: true }
+      );
+    } catch (err) {
+      console.error(`Cloud save error for ${key}:`, err);
+    }
+  }, []);
+
+  // Sync data helper
+  const syncUserData = useCallback(async (user: User) => {
+    setSyncing(true);
+    try {
+      const userDocRef = doc(db, "users", user.uid);
+      const userDoc = await getDoc(userDocRef);
+
+      if (userDoc.exists()) {
+        // Doc exists in Firestore: load to local state and storage
+        const data = userDoc.data();
+        if (data.workMinutes !== undefined) setWorkMinutes(data.workMinutes);
+        if (data.breakMinutes !== undefined) setBreakMinutes(data.breakMinutes);
+        if (data.subjects !== undefined) setSubjects(data.subjects);
+        if (data.selectedSubjects !== undefined) setSelectedSubjects(data.selectedSubjects);
+        if (data.completedSessions !== undefined) setCompletedSessions(data.completedSessions);
+        if (data.totalMinutes !== undefined) setTotalMinutes(data.totalMinutes);
+        if (data.studyLogs !== undefined) setStudyLogs(data.studyLogs);
+        if (data.weeklyTodos !== undefined) setWeeklyTodos(data.weeklyTodos);
+
+        if (data.workMinutes !== undefined) saveToStorage("vespera_work", data.workMinutes);
+        if (data.breakMinutes !== undefined) saveToStorage("vespera_break", data.breakMinutes);
+        if (data.subjects !== undefined) saveToStorage("vespera_subjects", data.subjects);
+        if (data.selectedSubjects !== undefined) saveToStorage("vespera_selected_subjects", data.selectedSubjects);
+        if (data.completedSessions !== undefined) saveToStorage("vespera_sessions", data.completedSessions);
+        if (data.totalMinutes !== undefined) saveToStorage("vespera_minutes", data.totalMinutes);
+        if (data.studyLogs !== undefined) saveToStorage("vespera_logs", data.studyLogs);
+        if (data.weeklyTodos !== undefined) saveToStorage("vespera_weekly_todos", data.weeklyTodos);
+      } else {
+        // Doc doesn't exist: upload current local state to cloud (migration)
+        const localData = {
+          workMinutes,
+          breakMinutes,
+          subjects,
+          selectedSubjects,
+          completedSessions,
+          totalMinutes,
+          studyLogs,
+          weeklyTodos,
+          updatedAt: Date.now(),
+        };
+        await setDoc(userDocRef, localData);
+      }
+    } catch (err) {
+      console.error("Firestore sync error:", err);
+    } finally {
+      setSyncing(false);
+    }
+  }, [
+    workMinutes,
+    breakMinutes,
+    subjects,
+    selectedSubjects,
+    completedSessions,
+    totalMinutes,
+    studyLogs,
+    weeklyTodos,
+  ]);
+
+  // Auth observer
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setCurrentUser(user);
+      if (user) {
+        await syncUserData(user);
+      }
+    });
+    return () => unsubscribe();
+  }, [syncUserData]);
+
+  // Sign out handler
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      // Clear local storage and reset states
+      localStorage.removeItem("vespera_work");
+      localStorage.removeItem("vespera_break");
+      localStorage.removeItem("vespera_sessions");
+      localStorage.removeItem("vespera_minutes");
+      localStorage.removeItem("vespera_logs");
+      localStorage.removeItem("vespera_subjects");
+      localStorage.removeItem("vespera_selected_subjects");
+      localStorage.removeItem("vespera_weekly_todos");
+
+      setWorkMinutes(20);
+      setBreakMinutes(5);
+      setSecondsLeft(20 * 60);
+      setCompletedSessions(0);
+      setTotalMinutes(0);
+      setStudyLogs({});
+      setSubjects(DEFAULT_SUBJECTS);
+      setSelectedSubjects([]);
+      setWeeklyTodos([]);
+      setHasStartedOnce(false);
+      setIsRunning(false);
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+  };
+
+  // Weekly Todo list actions
+  const handleAddTask = (text: string, subjectId: string, dayOfWeek: string) => {
+    const newTask: TodoTask = {
+      id: `task-${Date.now()}`,
+      text,
+      subjectId: subjectId || undefined,
+      completed: false,
+      dayOfWeek,
+      createdAt: Date.now(),
+    };
+    setWeeklyTodos((prev) => [...prev, newTask]);
+  };
+
+  const handleToggleTask = (id: string) => {
+    setWeeklyTodos((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t))
+    );
+  };
+
+  const handleDeleteTask = (id: string) => {
+    setWeeklyTodos((prev) => prev.filter((t) => t.id !== id));
+  };
 
   const toggleFocusMode = () => {
     const nextFocusMode = !isFocusMode;
@@ -177,6 +327,8 @@ export default function VesperaPage() {
     const savedMinutes = loadFromStorage("vespera_minutes", 0);
     const savedLogs = loadFromStorage<StudyLogs>("vespera_logs", {});
     const savedSubjects = loadFromStorage<{ id: string; label: string }[]>("vespera_subjects", DEFAULT_SUBJECTS);
+    const savedSelected = loadFromStorage<string[]>("vespera_selected_subjects", []);
+    const savedTodos = loadFromStorage<TodoTask[]>("vespera_weekly_todos", []);
 
     setWorkMinutes(savedWork);
     setBreakMinutes(savedBreak);
@@ -185,6 +337,8 @@ export default function VesperaPage() {
     setTotalMinutes(savedMinutes);
     setStudyLogs(savedLogs);
     setSubjects(savedSubjects);
+    setSelectedSubjects(savedSelected);
+    setWeeklyTodos(savedTodos);
     setHydrated(true);
   }, []);
 
@@ -192,32 +346,66 @@ export default function VesperaPage() {
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_work", workMinutes);
-  }, [workMinutes, hydrated]);
+    if (currentUser) {
+      saveToCloud("workMinutes", workMinutes);
+    }
+  }, [workMinutes, hydrated, currentUser, saveToCloud]);
 
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_break", breakMinutes);
-  }, [breakMinutes, hydrated]);
+    if (currentUser) {
+      saveToCloud("breakMinutes", breakMinutes);
+    }
+  }, [breakMinutes, hydrated, currentUser, saveToCloud]);
 
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_sessions", completedSessions);
-  }, [completedSessions, hydrated]);
+    if (currentUser) {
+      saveToCloud("completedSessions", completedSessions);
+    }
+  }, [completedSessions, hydrated, currentUser, saveToCloud]);
 
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_minutes", totalMinutes);
-  }, [totalMinutes, hydrated]);
+    if (currentUser) {
+      saveToCloud("totalMinutes", totalMinutes);
+    }
+  }, [totalMinutes, hydrated, currentUser, saveToCloud]);
 
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_logs", studyLogs);
-  }, [studyLogs, hydrated]);
+    if (currentUser) {
+      saveToCloud("studyLogs", studyLogs);
+    }
+  }, [studyLogs, hydrated, currentUser, saveToCloud]);
 
   useEffect(() => {
     if (!hydrated) return;
     saveToStorage("vespera_subjects", subjects);
-  }, [subjects, hydrated]);
+    if (currentUser) {
+      saveToCloud("subjects", subjects);
+    }
+  }, [subjects, hydrated, currentUser, saveToCloud]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_selected_subjects", selectedSubjects);
+    if (currentUser) {
+      saveToCloud("selectedSubjects", selectedSubjects);
+    }
+  }, [selectedSubjects, hydrated, currentUser, saveToCloud]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_weekly_todos", weeklyTodos);
+    if (currentUser) {
+      saveToCloud("weeklyTodos", weeklyTodos);
+    }
+  }, [weeklyTodos, hydrated, currentUser, saveToCloud]);
 
   // ── Record a completed session to study logs ──────────────────
   const recordSession = useCallback(
@@ -507,6 +695,36 @@ export default function VesperaPage() {
   return (
     <>
       <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 transition-all duration-500 ${isFocusMode ? 'justify-center h-dvh overflow-hidden' : ''}`}>
+        {/* Auth Button at the top right */}
+        {!isFocusMode && (
+          <div className="absolute top-4 right-4 sm:top-6 sm:right-6 animate-fade-in-up z-20">
+            {currentUser ? (
+              <div className="flex items-center gap-2.5 bg-zinc-900/60 border border-zinc-800/40 rounded-xl px-3 py-1.5 backdrop-blur-sm shadow-sm">
+                {syncing && (
+                  <Loader2 size={12} className="text-zinc-500 animate-spin shrink-0" />
+                )}
+                <span className="text-[11px] font-medium text-zinc-400 max-w-[120px] truncate">
+                  {currentUser.email}
+                </span>
+                <div className="w-px h-3 bg-zinc-800" />
+                <button
+                  onClick={handleLogout}
+                  className="text-[11px] text-zinc-500 hover:text-red-400 font-medium transition-colors cursor-pointer"
+                >
+                  Çıkış
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="text-[11px] font-semibold text-zinc-300 hover:text-zinc-100 bg-zinc-900/60 hover:bg-zinc-800/50 border border-zinc-800/50 hover:border-zinc-700/50 px-3.5 py-1.5 rounded-xl backdrop-blur-sm transition-all shadow-sm active:scale-95 cursor-pointer"
+              >
+                Buluta Yedekle / Giriş
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Header */}
         {!isFocusMode && (
           <header className="flex flex-col items-center mb-8 sm:mb-12 animate-fade-in-up group cursor-default">
@@ -696,6 +914,16 @@ export default function VesperaPage() {
               disabled={isRunning}
             />
 
+            {/* Weekly Todo List */}
+            <WeeklyTodoList
+              tasks={weeklyTodos}
+              subjects={subjects}
+              onAddTask={handleAddTask}
+              onToggleTask={handleToggleTask}
+              onDeleteTask={handleDeleteTask}
+              disabled={isRunning}
+            />
+
             {/* Settings Panel */}
             <SettingsPanel
               workMinutes={workMinutes}
@@ -732,6 +960,14 @@ export default function VesperaPage() {
           logs={studyLogs}
           subjectLabels={subjectLabels}
           onClose={() => setShowSummary(false)}
+        />
+      )}
+
+      {/* Auth Modal */}
+      {showAuthModal && (
+        <AuthModal
+          onClose={() => setShowAuthModal(false)}
+          onSuccess={() => setShowAuthModal(false)}
         />
       )}
     </>
