@@ -4,7 +4,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Play, Pause, RotateCcw, SkipForward, Timer, Maximize, Minimize, Loader2 } from "lucide-react";
+import { Play, Pause, RotateCcw, SkipForward, Maximize, Minimize } from "lucide-react";
 import TimerRing from "@/components/TimerRing";
 import StudyPanel from "@/components/StudyPanel";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -17,7 +17,9 @@ import AuthModal from "@/components/AuthModal";
 import WeeklyTodoList, { TodoTask } from "@/components/WeeklyTodoList";
 import { auth, db } from "@/lib/firebase";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, collection, deleteDoc, onSnapshot } from "firebase/firestore";
+import StudyRoomPanel, { RoomMember } from "@/components/StudyRoomPanel";
+import AdminPanel from "@/components/AdminPanel";
 
 // ─── Subject list (Default values) ──────────────────────────────
 const DEFAULT_SUBJECTS = [
@@ -104,7 +106,14 @@ export default function VesperaPage() {
   // Firebase Auth states
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // Shared Study Room states
+  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+  const [roomMembers, setRoomMembers] = useState<RoomMember[]>([]);
+
+  // Navigation tab state
+  const [currentTab, setCurrentTab] = useState<"pomodoro" | "admin">("pomodoro");
 
   // Cloud save helper
   const saveToCloud = useCallback(async (key: string, value: any) => {
@@ -123,14 +132,25 @@ export default function VesperaPage() {
 
   // Sync data helper
   const syncUserData = useCallback(async (user: User) => {
-    setSyncing(true);
     try {
       const userDocRef = doc(db, "users", user.uid);
       const userDoc = await getDoc(userDocRef);
 
+      const adminEmails = process.env.NEXT_PUBLIC_ADMIN_EMAILS || "mertmnvv@gmail.com,mertmnv3@gmail.com";
+      const emailList = adminEmails.split(",").map(e => e.trim().toLowerCase());
+      let userIsAdmin = false;
+
       if (userDoc.exists()) {
-        // Doc exists in Firestore: load to local state and storage
         const data = userDoc.data();
+        if (data.isAdmin === true) {
+          userIsAdmin = true;
+        } else if (user.email && emailList.includes(user.email.toLowerCase())) {
+          userIsAdmin = true;
+          await setDoc(userDocRef, { isAdmin: true }, { merge: true });
+        }
+        setIsAdmin(userIsAdmin);
+
+        // Doc exists in Firestore: load to local state and storage
         if (data.workMinutes !== undefined) setWorkMinutes(data.workMinutes);
         if (data.breakMinutes !== undefined) setBreakMinutes(data.breakMinutes);
         if (data.subjects !== undefined) setSubjects(data.subjects);
@@ -149,6 +169,11 @@ export default function VesperaPage() {
         if (data.studyLogs !== undefined) saveToStorage("vespera_logs", data.studyLogs);
         if (data.weeklyTodos !== undefined) saveToStorage("vespera_weekly_todos", data.weeklyTodos);
       } else {
+        if (user.email && emailList.includes(user.email.toLowerCase())) {
+          userIsAdmin = true;
+        }
+        setIsAdmin(userIsAdmin);
+
         // Doc doesn't exist: upload current local state to cloud (migration)
         const localData = {
           workMinutes,
@@ -159,14 +184,13 @@ export default function VesperaPage() {
           totalMinutes,
           studyLogs,
           weeklyTodos,
+          isAdmin: userIsAdmin,
           updatedAt: Date.now(),
         };
         await setDoc(userDocRef, localData);
       }
     } catch (err) {
       console.error("Firestore sync error:", err);
-    } finally {
-      setSyncing(false);
     }
   }, [
     workMinutes,
@@ -185,14 +209,34 @@ export default function VesperaPage() {
       setCurrentUser(user);
       if (user) {
         await syncUserData(user);
+      } else {
+        setIsAdmin(false);
+        setCurrentTab("pomodoro");
       }
     });
     return () => unsubscribe();
   }, [syncUserData]);
 
+  // Leave room cleanup
+  const leaveRoom = useCallback(async () => {
+    if (!auth.currentUser || !currentRoomId) return;
+    try {
+      const memberDocRef = doc(db, "rooms", currentRoomId, "members", auth.currentUser.uid);
+      await deleteDoc(memberDocRef);
+    } catch (err) {
+      console.error("Error leaving room:", err);
+    } finally {
+      setCurrentRoomId(null);
+      setRoomMembers([]);
+    }
+  }, [currentRoomId]);
+
   // Sign out handler
   const handleLogout = async () => {
     try {
+      if (currentRoomId) {
+        await leaveRoom();
+      }
       await signOut(auth);
       // Clear local storage and reset states
       localStorage.removeItem("vespera_work");
@@ -217,6 +261,68 @@ export default function VesperaPage() {
       setIsRunning(false);
     } catch (err) {
       console.error("Logout error:", err);
+    }
+  };
+
+  // Join Room
+  const handleJoinRoom = async (roomId: string): Promise<boolean> => {
+    if (!currentUser) return false;
+    try {
+      const roomDocRef = doc(db, "rooms", roomId);
+      const roomDoc = await getDoc(roomDocRef);
+      if (!roomDoc.exists()) {
+        return false;
+      }
+
+      // Add initial member state
+      const memberDocRef = doc(db, "rooms", roomId, "members", currentUser.uid);
+      await setDoc(memberDocRef, {
+        uid: currentUser.uid,
+        email: currentUser.email || "Anonim",
+        displayName: currentUser.displayName || currentUser.email?.split("@")[0] || "Öğrenci",
+        secondsLeft,
+        mode,
+        isRunning,
+        selectedSubjects,
+        lastActive: Date.now(),
+      });
+
+      setCurrentRoomId(roomId);
+      return true;
+    } catch (err) {
+      console.error("Error joining room:", err);
+      return false;
+    }
+  };
+
+  // Create Room
+  const handleCreateRoom = async () => {
+    if (!currentUser) return;
+    try {
+      const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const roomDocRef = doc(db, "rooms", code);
+      await setDoc(roomDocRef, {
+        createdBy: currentUser.uid,
+        createdAt: Date.now(),
+      });
+
+      // Add initial member state
+      const memberDocRef = doc(db, "rooms", code, "members", currentUser.uid);
+      await setDoc(memberDocRef, {
+        uid: currentUser.uid,
+        email: currentUser.email || "Anonim",
+        displayName: currentUser.displayName || currentUser.email?.split("@")[0] || "Öğrenci",
+        secondsLeft,
+        mode,
+        isRunning,
+        selectedSubjects,
+        lastActive: Date.now(),
+      });
+
+      setCurrentRoomId(code);
+    } catch (err) {
+      console.error("Error creating room:", err);
+      throw err;
     }
   };
 
@@ -329,6 +435,7 @@ export default function VesperaPage() {
     const savedSubjects = loadFromStorage<{ id: string; label: string }[]>("vespera_subjects", DEFAULT_SUBJECTS);
     const savedSelected = loadFromStorage<string[]>("vespera_selected_subjects", []);
     const savedTodos = loadFromStorage<TodoTask[]>("vespera_weekly_todos", []);
+    const savedRoom = loadFromStorage<string | null>("vespera_current_room", null);
 
     setWorkMinutes(savedWork);
     setBreakMinutes(savedBreak);
@@ -339,6 +446,7 @@ export default function VesperaPage() {
     setSubjects(savedSubjects);
     setSelectedSubjects(savedSelected);
     setWeeklyTodos(savedTodos);
+    setCurrentRoomId(savedRoom);
     setHydrated(true);
   }, []);
 
@@ -406,6 +514,94 @@ export default function VesperaPage() {
       saveToCloud("weeklyTodos", weeklyTodos);
     }
   }, [weeklyTodos, hydrated, currentUser, saveToCloud]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveToStorage("vespera_current_room", currentRoomId);
+    if (currentUser) {
+      saveToCloud("activeRoomId", currentRoomId);
+    }
+  }, [currentRoomId, hydrated, currentUser, saveToCloud]);
+
+  // Listen to members in the room in real time
+  useEffect(() => {
+    if (!currentRoomId) {
+      setRoomMembers([]);
+      return;
+    }
+
+    const membersRef = collection(db, "rooms", currentRoomId, "members");
+    const unsubscribe = onSnapshot(membersRef, (snapshot) => {
+      const membersList: RoomMember[] = [];
+      snapshot.forEach((doc) => {
+        membersList.push(doc.data() as RoomMember);
+      });
+      setRoomMembers(membersList);
+    }, (err) => {
+      console.error("Error reading room snapshot:", err);
+    });
+
+    return () => unsubscribe();
+  }, [currentRoomId]);
+
+  // Keep track of secondsLeft in a ref to avoid writing to Firestore every single second
+  const secondsLeftRef = useRef(secondsLeft);
+  useEffect(() => {
+    secondsLeftRef.current = secondsLeft;
+  }, [secondsLeft]);
+
+  // Sync state to room member doc
+  useEffect(() => {
+    if (!currentUser || !currentRoomId) return;
+
+    const memberDocRef = doc(db, "rooms", currentRoomId, "members", currentUser.uid);
+
+    const updateStatus = async () => {
+      try {
+        await setDoc(
+          memberDocRef,
+          {
+            uid: currentUser.uid,
+            email: currentUser.email || "Anonim",
+            displayName: currentUser.displayName || currentUser.email?.split("@")[0] || "Öğrenci",
+            secondsLeft: secondsLeftRef.current,
+            mode,
+            isRunning,
+            selectedSubjects,
+            lastActive: Date.now(),
+          },
+          { merge: true }
+        );
+      } catch (err) {
+        console.error("Error updating member status in Firestore:", err);
+      }
+    };
+
+    // Update status immediately on mode, run state or subject change
+    updateStatus();
+
+    // Heartbeat update every 10 seconds
+    const interval = setInterval(updateStatus, 10000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [currentUser, currentRoomId, mode, isRunning, selectedSubjects]);
+
+  // Leave room if window closes
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (currentUser && currentRoomId) {
+        const memberDocRef = doc(db, "rooms", currentRoomId, "members", currentUser.uid);
+        deleteDoc(memberDocRef).catch(() => {});
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [currentUser, currentRoomId]);
 
   // ── Record a completed session to study logs ──────────────────
   const recordSession = useCallback(
@@ -694,15 +890,12 @@ export default function VesperaPage() {
 
   return (
     <>
-      <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 transition-all duration-500 ${isFocusMode ? 'justify-center h-dvh overflow-hidden' : ''}`}>
+      <main className={`relative z-10 min-h-dvh flex flex-col items-center px-4 py-6 sm:py-10 pb-24 transition-all duration-500 ${isFocusMode ? 'justify-center h-dvh overflow-hidden pb-0' : ''}`}>
         {/* Auth Button at the top right */}
         {!isFocusMode && (
           <div className="absolute top-4 right-4 sm:top-6 sm:right-6 animate-fade-in-up z-20">
             {currentUser ? (
               <div className="flex items-center gap-2.5 bg-zinc-900/60 border border-zinc-800/40 rounded-xl px-3 py-1.5 backdrop-blur-sm shadow-sm">
-                {syncing && (
-                  <Loader2 size={12} className="text-zinc-500 animate-spin shrink-0" />
-                )}
                 <span className="text-[11px] font-medium text-zinc-400 max-w-[120px] truncate">
                   {currentUser.email}
                 </span>
@@ -719,7 +912,7 @@ export default function VesperaPage() {
                 onClick={() => setShowAuthModal(true)}
                 className="text-[11px] font-semibold text-zinc-300 hover:text-zinc-100 bg-zinc-900/60 hover:bg-zinc-800/50 border border-zinc-800/50 hover:border-zinc-700/50 px-3.5 py-1.5 rounded-xl backdrop-blur-sm transition-all shadow-sm active:scale-95 cursor-pointer"
               >
-                Buluta Yedekle / Giriş
+                Giriş / Kayıt
               </button>
             )}
           </div>
@@ -728,220 +921,319 @@ export default function VesperaPage() {
         {/* Header */}
         {!isFocusMode && (
           <header className="flex flex-col items-center mb-8 sm:mb-12 animate-fade-in-up group cursor-default">
-            <div className="flex items-center gap-3">
-              <div className="relative p-2.5 rounded-xl bg-gradient-to-br from-zinc-500/10 to-zinc-700/10 border border-zinc-700/20 shadow-[0_0_20px_rgba(255,255,255,0.02)] transition-all duration-300 group-hover:scale-105 group-hover:border-zinc-500/40">
-                <Timer size={22} className="text-zinc-400 animate-pulse group-hover:rotate-12 transition-transform duration-500" />
-                <div className="absolute inset-0 rounded-xl bg-zinc-500/5 blur-md opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none" />
-              </div>
-              <h1 className="text-3xl font-extrabold tracking-widest bg-gradient-to-r from-zinc-100 via-zinc-300 to-zinc-500 bg-clip-text text-transparent drop-shadow-[0_2px_8px_rgba(255,255,255,0.05)] transition-all duration-300">
+            <div className="flex flex-col items-center gap-2">
+              <h1 className="text-4xl font-black tracking-[0.3em] pl-[0.3em] bg-gradient-to-b from-zinc-100 via-zinc-300 to-zinc-600 bg-clip-text text-transparent drop-shadow-[0_4px_12px_rgba(255,255,255,0.08)] transition-all duration-300 group-hover:scale-[1.02]">
                 VESPERA
               </h1>
+              <div className="w-12 h-[1px] bg-zinc-800 group-hover:w-20 transition-all duration-500 my-1" />
             </div>
-            <p className="mt-3 text-xs font-medium italic tracking-wide text-zinc-400/80 bg-zinc-900/40 border border-zinc-800/30 px-3 py-1 rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.03)] backdrop-blur-sm group-hover:text-zinc-200 group-hover:border-zinc-700/20 transition-all duration-300">
+            <p className="mt-2 text-[10px] font-medium tracking-[0.15em] uppercase text-zinc-550 bg-zinc-900/25 border border-zinc-850/50 px-3.5 py-1 rounded-full shadow-[inset_0_1px_1px_rgba(255,255,255,0.02)] backdrop-blur-sm group-hover:text-zinc-300 group-hover:border-zinc-800 transition-all duration-300">
               &quot;Aut viam inveniam, aut faciam&quot;
             </p>
           </header>
         )}
 
-        {/* Mode Indicator Pills */}
-        <div className="flex gap-1 p-1 rounded-xl bg-zinc-900/80 border border-zinc-800/50 mb-8 animate-fade-in-up">
-          <button
-            onClick={() => {
-              if (!isRunning) {
-                setMode("work");
-                setSecondsLeft(workMinutes * 60);
-                setHasStartedOnce(false);
-              }
+        {currentTab === "admin" && isAdmin ? (
+          <AdminPanel
+            subjectLabels={subjectLabels}
+            onGoToRoom={(roomId) => {
+              handleJoinRoom(roomId);
+              setCurrentTab("pomodoro");
             }}
-            disabled={isRunning}
-            className={`
-              px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
-              transition-all duration-300
-              ${
-                mode === "work"
-                  ? "bg-zinc-200 text-zinc-950 shadow-sm font-semibold border border-zinc-300/10"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }
-              disabled:cursor-not-allowed
-            `}
-          >
-            Çalışma
-          </button>
-          <button
-            onClick={() => {
-              if (!isRunning) {
-                setMode("break");
-                setSecondsLeft(breakMinutes * 60);
-                setHasStartedOnce(false);
-              }
-            }}
-            disabled={isRunning}
-            className={`
-              px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
-              transition-all duration-300
-              ${
-                mode === "break"
-                  ? "bg-zinc-800 text-zinc-200 shadow-sm font-semibold border border-zinc-700/30"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }
-              disabled:cursor-not-allowed
-            `}
-          >
-            Mola
-          </button>
-        </div>
-
-        {/* Timer Ring */}
-        <div className="mb-8 animate-fade-in-up" style={{ animationDelay: "0.1s" }}>
-          <TimerRing
-            progress={progress}
-            mode={mode}
-            timeDisplay={timeDisplay}
-            label={timerLabel}
-            isRunning={isRunning}
           />
-        </div>
+        ) : (
+          <>
+            {isFocusMode ? (
+              <div className="flex flex-col items-center justify-center space-y-8 my-auto animate-fade-in-up">
+                {/* Mode Indicator Pills */}
+                <div className="flex gap-1 p-1 rounded-xl bg-zinc-900/80 border border-zinc-800/50">
+                  <button
+                    onClick={() => {
+                      if (!isRunning) {
+                        setMode("work");
+                        setSecondsLeft(workMinutes * 60);
+                        setHasStartedOnce(false);
+                      }
+                    }}
+                    disabled={isRunning}
+                    className={`
+                      px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+                      transition-all duration-300
+                      ${
+                        mode === "work"
+                          ? "bg-zinc-200 text-zinc-950 shadow-sm font-semibold border border-zinc-300/10"
+                          : "text-zinc-550 hover:text-zinc-350"
+                      }
+                      disabled:cursor-not-allowed
+                    `}
+                  >
+                    Çalışma
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!isRunning) {
+                        setMode("break");
+                        setSecondsLeft(breakMinutes * 60);
+                        setHasStartedOnce(false);
+                      }
+                    }}
+                    disabled={isRunning}
+                    className={`
+                      px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+                      transition-all duration-300
+                      ${
+                        mode === "break"
+                          ? "bg-zinc-800 text-zinc-200 shadow-sm font-semibold border border-zinc-700/30"
+                          : "text-zinc-550 hover:text-zinc-350"
+                      }
+                      disabled:cursor-not-allowed
+                    `}
+                  >
+                    Mola
+                  </button>
+                </div>
 
-        {/* Control Buttons */}
-        <div
-          className="flex items-center gap-3 mb-8 animate-fade-in-up"
-          style={{ animationDelay: "0.2s" }}
-        >
-          {/* Reset */}
-          <button
-            onClick={handleReset}
-            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
-            title="Sıfırla"
-          >
-            <RotateCcw size={18} />
-          </button>
+                {/* Timer Ring */}
+                <TimerRing
+                  progress={progress}
+                  mode={mode}
+                  timeDisplay={timeDisplay}
+                  label={timerLabel}
+                  isRunning={isRunning}
+                />
 
-          {/* Play / Pause */}
-          {isRunning ? (
-            <button
-              onClick={handlePause}
-              className={`
-                btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
-                ${
-                  mode === "work"
-                    ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
-                    : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
-                }
-              `}
-              title="Duraklat"
-            >
-              <Pause size={24} fill="currentColor" />
-            </button>
-          ) : (
-            <button
-              onClick={handleStart}
-              disabled={!canStart}
-              className={`
-                btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
-                ${
-                  mode === "work"
-                    ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
-                    : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
-                }
-                disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
-              `}
-              title="Başlat"
-            >
-              <Play size={24} fill="currentColor" />
-            </button>
-          )}
+                {/* Control Buttons */}
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleReset}
+                    className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+                    title="Sıfırla"
+                  >
+                    <RotateCcw size={18} />
+                  </button>
+                  <button
+                    onClick={isRunning ? handlePause : handleStart}
+                    disabled={!canStart}
+                    className={`
+                      btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
+                      ${
+                        mode === "work"
+                          ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
+                          : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
+                      }
+                      disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
+                    `}
+                    title={isRunning ? "Duraklat" : "Başlat"}
+                  >
+                    {isRunning ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
+                  </button>
+                  <button
+                    onClick={handleSkip}
+                    className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+                    title="Atla"
+                  >
+                    <SkipForward size={18} />
+                  </button>
+                  <button
+                    onClick={toggleFocusMode}
+                    className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95 ml-2"
+                    title="Odak Modundan Çık"
+                  >
+                    <Minimize size={18} />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="w-full max-w-md md:max-w-5xl grid grid-cols-1 md:grid-cols-12 gap-6 md:gap-8 items-start mx-auto animate-fade-in-up">
+                {/* Left Column: Timer & Controls (col-span-5) */}
+                <div className="md:col-span-5 flex flex-col items-center w-full space-y-6">
+                  {/* Mode Indicator Pills */}
+                  <div className="flex gap-1 p-1 rounded-xl bg-zinc-900/80 border border-zinc-800/50">
+                    <button
+                      onClick={() => {
+                        if (!isRunning) {
+                          setMode("work");
+                          setSecondsLeft(workMinutes * 60);
+                          setHasStartedOnce(false);
+                        }
+                      }}
+                      disabled={isRunning}
+                      className={`
+                        px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+                        transition-all duration-300
+                        ${
+                          mode === "work"
+                            ? "bg-zinc-200 text-zinc-950 shadow-sm font-semibold border border-zinc-300/10"
+                            : "text-zinc-550 hover:text-zinc-350"
+                        }
+                        disabled:cursor-not-allowed
+                      `}
+                    >
+                      Çalışma
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!isRunning) {
+                          setMode("break");
+                          setSecondsLeft(breakMinutes * 60);
+                          setHasStartedOnce(false);
+                        }
+                      }}
+                      disabled={isRunning}
+                      className={`
+                        px-4 py-1.5 rounded-lg text-xs font-medium uppercase tracking-wider
+                        transition-all duration-300
+                        ${
+                          mode === "break"
+                            ? "bg-zinc-800 text-zinc-200 shadow-sm font-semibold border border-zinc-700/30"
+                            : "text-zinc-550 hover:text-zinc-350"
+                        }
+                        disabled:cursor-not-allowed
+                      `}
+                    >
+                      Mola
+                    </button>
+                  </div>
 
-          {/* Skip */}
-          <button
-            onClick={handleSkip}
-            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
-            title="Atla"
-          >
-            <SkipForward size={18} />
-          </button>
+                  {/* Timer Ring */}
+                  <TimerRing
+                    progress={progress}
+                    mode={mode}
+                    timeDisplay={timeDisplay}
+                    label={timerLabel}
+                    isRunning={isRunning}
+                  />
 
-          {/* Fullscreen Toggle */}
-          <button
-            onClick={toggleFocusMode}
-            className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95 ml-2"
-            title={isFocusMode ? "Odak Modundan Çık" : "Odak Modu (Tam Ekran)"}
-          >
-            {isFocusMode ? <Minimize size={18} /> : <Maximize size={18} />}
-          </button>
-        </div>
+                  {/* Control Buttons */}
+                  <div className="flex items-center gap-3">
+                    {/* Reset */}
+                    <button
+                      onClick={handleReset}
+                      className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+                      title="Sıfırla"
+                    >
+                      <RotateCcw size={18} />
+                    </button>
 
-        {/* Stats */}
-        {!isFocusMode && (
-          <div
-            className="w-full max-w-md mb-6 animate-fade-in-up"
-            style={{ animationDelay: "0.25s" }}
-          >
-            <SessionStats
-              completedSessions={completedSessions}
-              totalMinutes={totalMinutes}
-            />
-          </div>
-        )}
+                    {/* Play / Pause */}
+                    {isRunning ? (
+                      <button
+                        onClick={handlePause}
+                        className={`
+                          btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
+                          ${
+                            mode === "work"
+                              ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
+                              : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
+                          }
+                        `}
+                        title="Duraklat"
+                      >
+                        <Pause size={24} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleStart}
+                        disabled={!canStart}
+                        className={`
+                          btn-glow p-5 rounded-2xl transition-all duration-300 active:scale-95
+                          ${
+                            mode === "work"
+                              ? "bg-zinc-200 text-zinc-950 hover:bg-zinc-100 shadow-lg shadow-zinc-500/10"
+                              : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700 border border-zinc-700 shadow-lg shadow-zinc-900/50"
+                          }
+                          disabled:opacity-30 disabled:cursor-not-allowed disabled:shadow-none
+                        `}
+                        title="Başlat"
+                      >
+                        <Play size={24} fill="currentColor" />
+                      </button>
+                    )}
 
-        {/* Daily Log Panel */}
-        {!isFocusMode && (
-          <div
-            className="w-full max-w-md mb-4 animate-fade-in-up"
-            style={{ animationDelay: "0.28s" }}
-          >
-            <DailyLog
-              todaySessions={todaySessions}
-              subjectLabels={subjectLabels}
-              onOpenCalendar={() => setShowCalendar(true)}
-              onOpenSummary={() => setShowSummary(true)}
-            />
-          </div>
-        )}
+                    {/* Skip */}
+                    <button
+                      onClick={handleSkip}
+                      className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95"
+                      title="Atla"
+                    >
+                      <SkipForward size={18} />
+                    </button>
 
-        {/* Bottom panels grid */}
-        {!isFocusMode && (
-          <div
-            className="w-full max-w-md grid grid-cols-1 gap-4 mb-8 animate-fade-in-up"
-            style={{ animationDelay: "0.3s" }}
-          >
-            {/* Study Panel */}
-            <StudyPanel
-              subjects={subjects}
-              selectedSubjects={selectedSubjects}
-              onToggle={toggleSubject}
-              onAddSubject={handleAddSubject}
-              onDeleteSubject={handleDeleteSubject}
-              disabled={isRunning}
-            />
+                    {/* Fullscreen Toggle */}
+                    <button
+                      onClick={toggleFocusMode}
+                      className="p-3 rounded-xl bg-zinc-800/50 border border-zinc-700/30 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 hover:border-zinc-600/40 transition-all duration-200 active:scale-95 ml-2"
+                      title="Odak Modu (Tam Ekran)"
+                    >
+                      <Maximize size={18} />
+                    </button>
+                  </div>
 
-            {/* Weekly Todo List */}
-            <WeeklyTodoList
-              tasks={weeklyTodos}
-              subjects={subjects}
-              onAddTask={handleAddTask}
-              onToggleTask={handleToggleTask}
-              onDeleteTask={handleDeleteTask}
-              disabled={isRunning}
-            />
+                  {/* Session Stats */}
+                  <div className="w-full">
+                    <SessionStats
+                      completedSessions={completedSessions}
+                      totalMinutes={totalMinutes}
+                    />
+                  </div>
 
-            {/* Settings Panel */}
-            <SettingsPanel
-              workMinutes={workMinutes}
-              breakMinutes={breakMinutes}
-              onWorkChange={handleWorkChange}
-              onBreakChange={handleBreakChange}
-              disabled={isRunning}
-            />
-          </div>
-        )}
+                  {/* Settings Panel */}
+                  <div className="w-full">
+                    <SettingsPanel
+                      workMinutes={workMinutes}
+                      breakMinutes={breakMinutes}
+                      onWorkChange={handleWorkChange}
+                      onBreakChange={handleBreakChange}
+                      disabled={isRunning}
+                    />
+                  </div>
+                </div>
 
-        {/* Footer */}
-        {!isFocusMode && (
-          <footer className="mt-auto pt-4 pb-6 text-center">
-            <p className="text-[11px] text-zinc-700 tracking-wider">
-              Odaklan · Çalış · Başar
-            </p>
-          </footer>
+                {/* Right Column: Workspaces, Rooms, Tasks (col-span-7) */}
+                <div className="md:col-span-7 flex flex-col gap-6 w-full">
+                  {/* Study Panel */}
+                  <StudyPanel
+                    subjects={subjects}
+                    selectedSubjects={selectedSubjects}
+                    onToggle={toggleSubject}
+                    onAddSubject={handleAddSubject}
+                    onDeleteSubject={handleDeleteSubject}
+                    disabled={isRunning}
+                  />
+
+                  {/* Shared Study Room Panel */}
+                  <StudyRoomPanel
+                    currentUser={currentUser}
+                    currentRoomId={currentRoomId}
+                    roomMembers={roomMembers}
+                    subjectLabels={subjectLabels}
+                    onAuthPrompt={() => setShowAuthModal(true)}
+                    onJoinRoom={handleJoinRoom}
+                    onCreateRoom={handleCreateRoom}
+                    onLeaveRoom={leaveRoom}
+                  />
+
+                  {/* Weekly Todo List */}
+                  <WeeklyTodoList
+                    tasks={weeklyTodos}
+                    subjects={subjects}
+                    onAddTask={handleAddTask}
+                    onToggleTask={handleToggleTask}
+                    onDeleteTask={handleDeleteTask}
+                    disabled={isRunning}
+                  />
+
+                  {/* Daily Log Panel */}
+                  <DailyLog
+                    todaySessions={todaySessions}
+                    subjectLabels={subjectLabels}
+                    onOpenCalendar={() => setShowCalendar(true)}
+                    onOpenSummary={() => setShowSummary(true)}
+                  />
+                </div>
+              </div>
+            )}
+          </>
         )}
       </main>
 
@@ -969,6 +1261,52 @@ export default function VesperaPage() {
           onClose={() => setShowAuthModal(false)}
           onSuccess={() => setShowAuthModal(false)}
         />
+      )}
+
+      {/* Footer Bar */}
+      {!isFocusMode && (
+        <div className={`fixed bottom-6 left-1/2 -translate-x-1/2 z-40 w-fit max-w-[90vw] bg-zinc-950/75 border border-zinc-850/80 backdrop-blur-xl py-2 px-3.5 rounded-full shadow-[0_16px_36px_rgba(0,0,0,0.6)] transition-all duration-300 hover:border-zinc-700/40 ${
+          !isAdmin ? "hidden md:flex" : "flex"
+        }`}>
+          <div className="flex items-center gap-4 select-none">
+            {/* Version */}
+            <span className="hidden sm:inline-flex text-[9px] font-bold tracking-[0.1em] text-zinc-650 uppercase border-r border-zinc-850/80 pr-3 my-0.5">
+              V1.2.0
+            </span>
+
+            {/* Navigation Tabs */}
+            {isAdmin && (
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setCurrentTab("pomodoro")}
+                  className={`px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all duration-300 active:scale-95 cursor-pointer ${
+                    currentTab === "pomodoro"
+                      ? "bg-zinc-200 text-zinc-950"
+                      : "text-zinc-550 hover:text-zinc-350"
+                  }`}
+                >
+                  Zamanlayıcı
+                </button>
+
+                <button
+                  onClick={() => setCurrentTab("admin")}
+                  className={`px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all duration-300 active:scale-95 cursor-pointer ${
+                    currentTab === "admin"
+                      ? "bg-zinc-200 text-zinc-950"
+                      : "text-zinc-550 hover:text-zinc-350"
+                  }`}
+                >
+                  Admin Paneli
+                </button>
+              </div>
+            )}
+
+            {/* Copyright indicator */}
+            <span className="hidden sm:inline-flex text-[9px] font-semibold text-zinc-755 uppercase tracking-widest border-l border-zinc-850/80 pl-3 py-0.5">
+              &copy; Vespera
+            </span>
+          </div>
+        </div>
       )}
     </>
   );
